@@ -5,17 +5,18 @@ sandbox rootfs 自带的 `ld-linux-x86-64.so.2` 启动容器内命令。
 
 ## 背景
 
-镜像由 GitHub Actions 构建出 docker-archive 后，传到集群用
+镜像构建出 docker-archive 后，可用
 
 ```bash
 apptainer build --fakeroot --sandbox af3_new.sandbox docker-archive:af3-new.tar
 ```
 
 展开成 sandbox 目录树。正常途径是 `apptainer exec` / `apptainer run` 进入
-sandbox，但集群 `max_user_namespaces=0`，user namespace 不可用，这条路走不通。
+sandbox，但当宿主禁用了 user namespace（如 sysctl `max_user_namespaces=0`）
+时这条路走不通。
 
-sandbox 本质是一个完整的 Linux rootfs（Ubuntu 24.04 / glibc 2.39），而宿主是
-RHEL7 / glibc 2.17——宿主的加载器跑不了容器里的二进制。但容器内 ELF 记录的
+sandbox 本质是一个完整的 Linux rootfs（Ubuntu 24.04 / glibc 2.39）；若宿主
+glibc 远旧于容器（如 RHEL7 / glibc 2.17），宿主的加载器跑不了容器里的二进制。但容器内 ELF 记录的
 解释器就是 `/lib64/ld-linux-x86-64.so.2`，它就在 sandbox 里：直接调用这个
 动态加载器、用 `--library-path` 把 sandbox 的库目录喂给它，就能在不进
 namespace、不要 root 的情况下跑容器里的 Python 和 AF3。
@@ -23,7 +24,7 @@ namespace、不要 root 的情况下跑容器里的 Python 和 AF3。
 ## 原理
 
 - **加载器**：`$SB/lib64/ld-linux-x86-64.so.2 --library-path <sandbox 库> <目标二进制>`。
-  容器自己的 glibc 2.39 加载容器自己的所有依赖，宿主 glibc 2.17 完全不参与。
+  容器自己的 glibc 2.39 加载容器自己的所有依赖，宿主 glibc 完全不参与。
 - **库搜索顺序**：NVIDIA 用户态库（nvcc / cublas / cudnn / nccl）→ venv →
   sandbox 系统库，保证容器内 CUDA 库优先于宿主。
 - **Python 定位**：`PYTHONHOME=$SB/usr`，`PYTHONPATH` 指向 sandbox 内的 venv
@@ -32,14 +33,14 @@ namespace、不要 root 的情况下跑容器里的 Python 和 AF3。
   `usr/bin/python3.12`；其他命令依次查 `usr/bin/`、`bin/`。
 - 不需要 apptainer、不需要 proot、不需要 root、不需要 user namespace。
 
-## 脚本（脱敏版）
+## 脚本
 
 把 `SB` 一行改成你的 sandbox 实际路径即可用：
 
 ```bash
 #!/bin/bash
 # af3-exec.sh — 用容器自己的 ld-linux + glibc 直接跑 AF3 容器内命令
-# 绕过 apptainer user namespace 限制（集群 max_user_namespaces=0）
+# 绕过 apptainer user namespace 限制（如宿主 max_user_namespaces=0）
 #
 # 用法: af3-exec.sh <command> [args...]
 #   af3-exec.sh python --version
@@ -93,14 +94,11 @@ esac
     --json_path=in.json --output_dir=out --model_dir=/db --db_dir=/db
 ```
 
-LSF 作业里把 wrapper 当作启动器用（资源请求与业务命令解耦）：
+作业脚本里把 wrapper 当作启动器用（资源请求与业务命令解耦，调度器不限）：
 
 ```bash
 #!/bin/bash
-#BSUB -J af3_job
-#BSUB -q q4gpu
-#BSUB -o %J.stdout
-#BSUB -e %J.err
+# 作业脚本（LSF/Slurm/直跑均同理），示例：
 
 EXEC=/path/to/container/af3-exec.sh
 $EXEC python /opt/af3/run_alphafold.py --json_path=in.json --output_dir=out
